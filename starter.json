@@ -1,0 +1,21 @@
+{
+  "name": "Slugger Park",
+  "genre": "sports",
+  "dim": "3D",
+  "mode": "Versus",
+  "players": "2–8",
+  "hook": "Backyard baseball. Pick your pitch, time your swing.",
+  "how": "Pitch a fastball, curve or changeup to a spot in or out of the zone. At bat, put the ring on the ball and swing as it arrives: timing and placement decide whiff, foul, grounder, liner, fly or home run.",
+  "controls": "Mouse to aim the ring or the pitch, click or Space to swing or throw, 1 2 3 pick a pitch · touch: drag to aim, SWING / PITCH buttons",
+  "uses": [
+    ["Host-run rules", "The host's browser runs the fielders, throws, runners, outs and innings; if it leaves, the next player takes over."],
+    ["Bots", "Bots fill every empty spot, so even alone you play a full four-a-side game."],
+    ["Leaderboard", "Each player's most home runs in one game, shown on the results card."],
+    ["Live sync", "Every pitch, swing, catch and run plays out the same on every screen."]
+  ],
+  "ideas": [
+    "Make it a night game under the lights with a glowing ball",
+    "Add a knuckleball that wobbles on the way in",
+    "Let the batter bunt by holding the swing button"
+  ]
+}
