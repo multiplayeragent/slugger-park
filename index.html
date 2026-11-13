@@ -38,6 +38,7 @@
   #net { bottom: max(4px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); font-size: 12px; opacity: .8; white-space: nowrap; }
   #clockBar { position: fixed; left: 50%; top: calc(max(8px, env(safe-area-inset-top)) + 54px); width: 120px; height: 6px; margin-left: -60px; border-radius: 3px; background: #0006; overflow: hidden; pointer-events: none; }
   #clockBar i { display: block; height: 100%; width: 100%; background: #ffd23f; }
+  @media (max-width: 560px) { #clockBar { top: calc(max(8px, env(safe-area-inset-top)) + 104px); } } /* a phone: under the scoreboard, not across it */
   .ctl { position: fixed; display: flex; gap: 8px; }
   .ctl button { min-width: 56px; min-height: 48px; padding: 0 12px; border-radius: 14px; border: 2px solid #ffffffb0; background: #0d1a2ec0; color: #fff; font: 900 14px system-ui, sans-serif; touch-action: none; cursor: pointer; }
   .ctl button.on { background: #ffd23f; color: #3a2000; border-color: #fff; }
@@ -178,6 +179,8 @@ const CONFIG = {
   rollFriction: 0.55,    // how fast a rolling ball slows
   // Running and fielding
   runSpeed: 7.8,         // m/s round the bases
+  leadOff: 0.45,         // with the ball in the air, runners who must go come this far off their base (0..1 of the way) and wait
+  runSafeMs: 250,        // a runner only sets off for another base when it would beat the throw there by this much
   trotSpeed: 16,         // m/s on a home-run trot (fast-forwarded)
   fieldSpeed: 6.2,       // m/s fielders run
   reactMs: 350,          // fielders wait this long after contact before they move
@@ -192,6 +195,8 @@ const CONFIG = {
   botChase: 0.28,        // ...and at a ball
   botHits: { whiff: 0.18, foul: 0.2, ground: 0.2, liner: 0.25, fly: 0.12, hr: 0.06 }, // what a bot's swing does (before pitch effects)
   botStrike: 0.64,       // share of a bot's pitches aimed in the zone
+  botRunMs: 500,         // a bot batter thinks about RUN! this long after its ball comes down...
+  botRunSafeMs: 150,     // ...and sends everyone only when they'd all beat the throw by this much
   sendMs: 66,            // the host writes the ball, fielders and runners ~15 times a second
   board: "slugger-hr",
 };
@@ -672,6 +677,12 @@ function arrangeSeats(seats, people) {
   return fillBots(t);
 }
 const batterFor = (g) => g.seats[g.half][g.order[g.half] % CONFIG.lineup];
+/** Whoever is due up but still standing on a base misses that turn (nobody bats and runs at once): the next in the order bats. */
+function skipRunners(g) {
+  const order = [...g.order];
+  for (let k = 1; k < CONFIG.lineup && g.bases.includes(g.seats[g.half][order[g.half] % CONFIG.lineup]); k++) order[g.half]++;
+  return { ...g, order };
+}
 /** The pitcher: the people on the fielding team take turns (one per batter); with nobody there, the bots do. */
 function pitcherFor(g) { const team = g.seats[1 - g.half], people = team.filter((id) => !isBot(id)), list = people.length ? people : team; return list[g.pa % list.length]; }
 /** After the seats change: the batter (and, between pitches, the pitcher) must be someone who is still seated. */
@@ -699,6 +710,7 @@ function addRun(g, id) {
 /** Ready for the next pitch: who bats, who pitches, and the pitch clock. */
 function toReady(g, T) {
   host.play = emptyPlay(g.pn); host.botSwing = null;
+  g = skipRunners(g);
   const next = { ...g, bat: batterFor(g), pit: pitcherFor(g) };
   return { ...next, phase: "ready", at: T + (isBot(next.pit) ? CONFIG.botPitchMs : CONFIG.pitchClockMs) };
 }
@@ -836,7 +848,8 @@ function playTick(dt, g, T) {
     writeGame(next); P.bres = 4; P.rn = [];
   }
   moveFielders(P, dt, T);
-  moveRunners(P, dt);
+  botRun(P, T);
+  moveRunners(P, dt, T);
   g = game();
   const settled = ["held", "gone", "none"].includes(P.st) && !P.tb && P.rn.every((r) => r.out || (r.t === 0 && r.g <= r.b));
   P.calm = settled ? P.calm || T : 0;
@@ -882,7 +895,7 @@ function stepBall(P, dt, T) {
 function caught(P, i, T) {
   if (!P.bn) {
     const bat = P.rn.find((r) => r.id === P.bt); if (bat) bat.out = 1;
-    for (const r of P.rn) if (!r.out) { r.g = r.b; r.t = 0; }
+    for (const r of P.rn) if (!r.out) r.g = r.b; // everyone else goes back to their base
     P.outs++; P.bo = 1; P.fo = 1;
     const g = game(); writeGame({ ...g, outs: g.outs + 1 });
   }
@@ -906,8 +919,28 @@ function landedRunners(P) {
 function applyRun(from, m) {
   const g = game(), P = host.play;
   if (!g || !P || !m || g.phase !== "play" || m.n !== P.n || from !== P.bt || P.ex) return;
+  sendRunners(P);
+}
+/** The base a runner would be going for after RUN!: one past where it is headed now. */
+const extraBase = (r) => Math.min(4, Math.max(r.g, r.b + (r.t > 0 ? 1 : 0)) + 1);
+function sendRunners(P) {
   P.ex = 1;
-  if (P.bn && !P.hr) { for (const r of P.rn) if (!r.out) r.g = Math.min(4, Math.max(r.g, r.b + (r.t > 0 ? 1 : 0)) + 1); chainGoals(P.rn); }
+  if (P.bn && !P.hr) { for (const r of P.rn) if (!r.out) r.g = extraBase(r); chainGoals(P.rn); }
+}
+/** A bot batter uses RUN! the way a person does: a moment after its ball is down and still loose, when everyone would beat the throw to one more base. */
+function botRun(P, T) {
+  const K = CONFIG, down = P.t0 + (P.land ? P.land.e * 1000 : 0);
+  if (P.ex || P.hr || !P.bn || P.st !== "roll" || !isBot(P.bt) || T < down + K.botRunMs || !P.rn.some((r) => !r.out)) return;
+  const makeIt = (r) => ((extraBase(r) - r.b - r.t) * BD) / runSpeed(P) + K.botRunSafeMs / 1000 < ballTimeTo(P, extraBase(r), T);
+  if (P.rn.every((r) => r.out || makeIt(r))) sendRunners(P);
+}
+/** Seconds until the fielders could have the ball at base k: the run to the ball, the set, and the throw. */
+function ballTimeTo(P, k, T) {
+  const K = CONFIG, b = baseAt(k), set = K.throwDelayMs / 1000;
+  if (P.st === "held") return set + dist(host.fl[P.k], b) / K.throwSpeed;
+  if (P.st === "throw") { const left = Math.max(0, P.f.d - (T - P.f.t0) / 1000); return P.f.to === k ? left : left + set + dist(baseAt(P.f.to), b) / K.throwSpeed; }
+  const f = host.fl[P.ch], spot = P.aim || P.land || P; // a loose ball: someone has to get to it first
+  return (f ? dist(f, spot) / K.fieldSpeed : 1) + set + dist(spot, b) / K.throwSpeed;
 }
 /** "throw" {n, base} from the fielding player (the pitcher's seat): the next throw goes there. */
 function applyThrowPick(from, m) {
@@ -922,7 +955,7 @@ function decideThrow(P) {
   if (P.cb) { const k = P.cb; P.cb = 0; return k; }
   let best = 0, lead = 0;
   for (const r of P.rn) {
-    if (r.out || (r.g <= r.b && r.t === 0)) continue; // standing on a base
+    if (r.out || r.g <= r.b) continue; // standing on a base, or going back to it
     const k = r.b + 1, tr = ((1 - r.t) * BD) / runSpeed(P), tt = dist(from, baseAt(k)) / K.throwSpeed + K.throwDelayMs / 1000;
     lead = Math.max(lead, k);
     if (tt + 0.1 < tr && k > best) best = k;
@@ -962,18 +995,18 @@ function outsAt(P, k) {
   }
   P.tb = 0;
 }
-function moveRunners(P, dt) {
+function moveRunners(P, dt, T) {
+  const K = CONFIG, stride = (runSpeed(P) * dt) / BD, base = BD / runSpeed(P); // one frame's running, and the seconds from one base to the next
   for (const r of P.rn) {
-    if (r.out || (r.g <= r.b && r.t === 0)) continue;
-    if (r.id !== P.bt && !P.bn && !P.hr) continue; // a ball in the air: runners wait on their base
-    r.t += (runSpeed(P) * dt) / BD;
+    if (r.out) continue;
+    if (r.g <= r.b) { r.t = Math.max(0, r.t - stride); continue; } // staying: back to the base if they came off it
+    if (r.id !== P.bt && !P.bn && !P.hr) { r.t = Math.min(K.leadOff, r.t + stride); continue; } // a ball in the air: lead off and wait to see if it's caught
+    // on a base with further to go: stay unless they'd beat the throw to the next one (runners pushed from behind, and RUN!, always go)
+    if (r.t === 0 && r.b >= 1 && P.st !== "air" && !P.hr && !P.ex && !forced(P, r) && ballTimeTo(P, r.b + 1, T) < base + K.runSafeMs / 1000) { r.g = r.b; continue; }
+    r.t += stride;
     if (r.t < 1) continue;
     r.b++; r.t = 0;
-    if (r.b >= 4) { r.scored = 1; if (r.id === P.bt) P.bres = 4; const g = game(); if (g.outs < CONFIG.outs) { writeGame(addRun(g, r.id)); P.runs++; } continue; }
-    if (r.g > r.b && !P.ex && !forced(P, r)) { // the ball's in close to the next base: hold up here (RUN! keeps going)
-      const next = baseAt(r.b + 1);
-      if ((P.st === "held" && dist(P, next) < 30) || (P.st === "throw" && P.f && P.f.to > r.b)) r.g = r.b;
-    }
+    if (r.b >= 4) { r.scored = 1; if (r.id === P.bt) P.bres = 4; const g = game(); if (g.outs < K.outs) { writeGame(addRun(g, r.id)); P.runs++; } }
   }
   P.rn = P.rn.filter((r) => !r.scored);
 }
@@ -1203,8 +1236,9 @@ function batters(g, dt) {
   if (g.phase === "play" && P) {
     for (const r of P.rn) {
       if (r.out) continue;
-      const moving = r.g > r.b || r.t > 0, t = moving ? Math.min(1, r.t + (runSpeed(P) * ahead) / BD) : r.t, a = baseAt(r.b), b = baseAt(r.b + 1);
-      place(r.id, lerp(a.x, b.x, t), lerp(a.y, b.y, t), Math.atan2(b.x - a.x, b.y - a.y), false);
+      const going = r.g > r.b && (r.id === P.bt || P.bn || P.hr), back = r.g <= r.b && r.t > 0, stride = (runSpeed(P) * ahead) / BD; // as the host moves them
+      const t = going ? Math.min(1, r.t + stride) : back ? Math.max(0, r.t - stride) : r.t, a = baseAt(r.b), b = baseAt(r.b + 1);
+      place(r.id, lerp(a.x, b.x, t), lerp(a.y, b.y, t), Math.atan2(b.x - a.x, b.y - a.y) + (back ? Math.PI : 0), false);
     }
   } else {
     g.bases.forEach((id, i) => { if (id) { const b = baseAt(i + 1); place(id, b.x + 0.6, b.y - 0.3, 0, false); } });
@@ -1367,7 +1401,7 @@ function onBases(g) {
   const P = playNow();
   if (g.phase !== "play" || !P) return g.bases.map(Boolean);
   const out = [false, false, false];
-  for (const r of P.rn) if (!r.out && r.t === 0 && r.b >= 1 && r.b <= 3) out[r.b - 1] = true;
+  for (const r of P.rn) { const b = r.b + (r.t > 0.5 ? 1 : 0); if (!r.out && b >= 1 && b <= 3) out[b - 1] = true; } // the base each runner is nearest
   return out;
 }
 function hud(g, now) {
@@ -1395,10 +1429,10 @@ function hud(g, now) {
   const roles = {
     bat: ["YOU'RE UP!", touchUI ? "Drag to put the ring on the ball, SWING as it arrives. Ring above the ball: a grounder. Below: in the air." : "Mouse or arrows: put the ring on the ball. Click or Space as it arrives. Ring above the ball: a grounder. Below: in the air."],
     pitch: ["YOU'RE PITCHING", `Pick a pitch, aim at a spot, then ${touchUI ? "PITCH" : "click or Space"}. Corners and off-speed fool batters.`],
-    run: ["IT'S IN PLAY!", "RUN! sends everyone for an extra base. Risky."],
+    run: P && P.hr ? ["IT'S GONE!", "Touch 'em all."] : ["IT'S IN PLAY!", "RUN! sends everyone for an extra base. Risky."],
     field: ["FIELDING", "Tap a base: the next throw goes there."],
   };
-  const r = roles[role] || (g.phase === "over" ? ["BALLGAME", ""] : team < 0 ? ["WATCHING", "Both teams are full: you'll get a spot when one opens."] : team === g.half ? ["YOUR TEAM IS BATTING", upIn > 0 ? `You're up in ${upIn} batter${upIn > 1 ? "s" : ""}` : "You're up next"] : ["YOUR TEAM IS FIELDING", g.pit === net.sessionId ? "You're pitching" : "You pitch to a later batter"]);
+  const r = roles[role] || (g.phase === "over" ? ["BALLGAME", ""] : team < 0 ? ["WATCHING", "Both teams are full: you'll get a spot when one opens."] : team === g.half ? ["YOUR TEAM IS BATTING", g.bases.includes(net.sessionId) ? "You're on base" : upIn > 0 ? `You're up in ${upIn} batter${upIn > 1 ? "s" : ""}` : "You're up next"] : ["YOUR TEAM IS FIELDING", g.pit === net.sessionId ? "You're pitching" : "You pitch to a later batter"]);
   $("role").innerHTML = `${esc(r[0])}<small>${esc(r[1])}</small>`;
   ui("pitchUI", role === "pitch");
   for (const b of $("pitchUI").querySelectorAll("[data-ty]")) b.classList.toggle("on", b.dataset.ty === me.ty);
@@ -1495,6 +1529,7 @@ cv.addEventListener("pointermove", (e) => {
   if (role === "bat") { me.cx = clamp(me.cx + dx, -1.8, 1.8); me.cy = clamp(me.cy + dy, -1.8, 1.8); }
   if (role === "pitch") { me.ax = clamp(me.ax + dx, -1.8, 1.8); me.ay = clamp(me.ay + dy, -1.8, 1.8); }
 });
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
 for (const ev of ["pointerup", "pointercancel"]) cv.addEventListener(ev, (e) => { if (drag && e.pointerId === drag.id) drag = null; });
 function tap(el, fn) { el.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); unlockAudio(); fn(e); }); }
 tap($("bSwing"), swing);
